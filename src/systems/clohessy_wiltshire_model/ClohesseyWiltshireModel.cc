@@ -24,7 +24,7 @@
  *
  */
 
-#include "SpacecraftThrusterModel.hh"
+#include "ClohesseyWiltshireModel.hh"
 
 #include <chrono>
 #include <memory>
@@ -50,6 +50,8 @@
 #include "gz/sim/components/Actuators.hh"
 #include "gz/sim/components/ExternalWorldWrenchCmd.hh"
 #include "gz/sim/components/Pose.hh"
+#include "gz/sim/components/Inertial.hh"
+#include "gz/sim/components/LinearVelocity.hh"
 #include "gz/sim/Entity.hh"
 #include "gz/sim/EntityComponentManager.hh"
 #include "gz/sim/Link.hh"
@@ -61,11 +63,11 @@ using namespace gz;
 using namespace sim;
 using namespace systems;
 
-class gz::sim::systems::ClosesseyWiltshireModelPrivate
+class gz::sim::systems::ClohesseyWiltshireModelPrivate
 {
 
   /// \brief Apply link forces based on the relative state.
-  public: void UpdateForce(EntityComponentManager &_ecm);
+  public: void UpdateForces(EntityComponentManager &_ecm);
 
   /// \brief Link Entity
   public: Entity linkEntity;
@@ -87,30 +89,32 @@ class gz::sim::systems::ClosesseyWiltshireModelPrivate
 };
 
 //////////////////////////////////////////////////
-ClosesseyWiltshireModel::ClosesseyWiltshireModel()
-  : dataPtr(std::make_unique<ClosesseyWiltshireModelPrivate>())
+ClohesseyWiltshireModel::ClohesseyWiltshireModel()
+  : dataPtr(std::make_unique<ClohesseyWiltshireModelPrivate>())
 {
 }
 
 //////////////////////////////////////////////////
-void ClosesseyWiltshireModel::Configure(const Entity &_entity,
+void ClohesseyWiltshireModel::Configure(const Entity &_entity,
                                         const std::shared_ptr<const sdf::Element> &_sdf,
                                         EntityComponentManager &_ecm,
                                         EventManager &/*_eventMgr*/)
 {
+
+  /// save the model entity.
   this->dataPtr->model = Model(_entity);
 
   if (!this->dataPtr->model.Valid(_ecm))
   {
-    gzerr << "ClosesseyWiltshireModel plugin should be attached to a model "
+    gzerr << "ClohesseyWiltshireModel plugin should be attached to a model. Make sure the plugin is attached under a <model> tag in the SDF file." 
           << "entity. Failed to initialize." << std::endl;
     return;
   }
-
+  
+  //  sdf element tags under the <plugin> tag. Applied to read parameters of the plugin
   auto sdfClone = _sdf->Clone();
-
-  this->dataPtr->topic.clear();
-
+  
+  // Check for the link_name parameter
   if (sdfClone->HasElement("link_name"))
   {
     this->dataPtr->linkName = sdfClone->Get<std::string>("link_name");
@@ -118,12 +122,12 @@ void ClosesseyWiltshireModel::Configure(const Entity &_entity,
 
   if (this->dataPtr->linkName.empty())
   {
-    gzerr << "ClosesseyWiltshireModel found an empty link_name parameter. "
+    gzerr << "ClohesseyWiltshireModel found an empty link_name parameter. "
            << "Failed to initialize.";
     return;
   }
 
-
+  // Check for the mean_motion parameter
   if (sdfClone->HasElement("mean_motion"))
   {
     this->dataPtr->meanMotion =
@@ -135,10 +139,7 @@ void ClosesseyWiltshireModel::Configure(const Entity &_entity,
     return;
   }
 
-
-
-  // Look for components
-  // If the link hasn't been identified yet, look for it
+  // Look for the link entity over which the force should be applied
   if (this->dataPtr->linkEntity == kNullEntity)
   {
     this->dataPtr->linkEntity =
@@ -152,25 +153,39 @@ void ClosesseyWiltshireModel::Configure(const Entity &_entity,
     return;
   }
 
-  bool providedAllComponents = true;
+  // Make sure the inertial component of the link exists for force computation.
+  const auto *inertialComp = _ecm.Component<components::Inertial>(this->dataPtr->linkEntity);
+  if (!inertialComp)
+  {
+    gzerr << "Inertial component not found for link [" << this->dataPtr->linkName << "]\n";
+    return;
+  }
+
+  // Access the mass
+  double mass = inertialComp->Data().MassMatrix().Mass();
+
+  gzdbg << "Mass of link [" << this->dataPtr->linkName << "]: " << mass << " kg\n";
+
+  // Check that the world pose is available and add if not available
   if (!_ecm.Component<components::WorldPose>(this->dataPtr->linkEntity))
   {
     _ecm.CreateComponent(this->dataPtr->linkEntity, components::WorldPose());
   }
 
-  if (!providedAllComponents) {
-    gzdbg << "Created necessary components." << std::endl;
+  // Check that the world linear velocity is available and add if not available
+  if (!_ecm.Component<components::WorldLinearVelocity>(this->dataPtr->linkEntity))
+  {
+    _ecm.CreateComponent(this->dataPtr->linkEntity, components::WorldLinearVelocity());
   }
-
 }
 
-
 //////////////////////////////////////////////////
-void ClosesseyWiltshireModel::PreUpdate(const UpdateInfo &_info,
+void ClohesseyWiltshireModel::PreUpdate(const UpdateInfo &_info,
     EntityComponentManager &_ecm)
 {
-  GZ_PROFILE("ClosesseyWiltshireModel::PreUpdate");
-  // \TODO(anyone) Support rewind
+  GZ_PROFILE("ClohesseyWiltshireModel::PreUpdate");
+
+
   if (_info.dt < std::chrono::steady_clock::duration::zero())
   {
     gzwarn << "Detected jump back in time ["
@@ -183,113 +198,63 @@ void ClosesseyWiltshireModel::PreUpdate(const UpdateInfo &_info,
     return;
 
   this->dataPtr->simTime = std::chrono::duration<double>(_info.simTime).count();
-  this->dataPtr->UpdateForcesAndMoments(_ecm);
+  this->dataPtr->UpdateForces(_ecm);
 }
 
 //////////////////////////////////////////////////
-void ClosesseyWiltshireModelPrivate::UpdateForcesAndMoments(
+void ClohesseyWiltshireModelPrivate::UpdateForces(
     EntityComponentManager &_ecm)
 {
-  GZ_PROFILE("ClosesseyWiltshireModelPrivate::UpdateForcesAndMoments");
-  std::optional<msgs::Actuators> msg;
-  auto actuatorMsgComp =
-      _ecm.Component<components::Actuators>(this->model.Entity());
-
-  // Actuators messages can come in from transport or via a component. If a
-  // component is available, it takes precedence.
-  if (actuatorMsgComp)
-  {
-    msg = actuatorMsgComp->Data();
-  }
-  else
-  {
-    std::lock_guard<std::mutex> lock(this->recvdActuatorsMsgMutex);
-    if (this->recvdActuatorsMsg.has_value())
-    {
-      msg = *this->recvdActuatorsMsg;
-    }
-  }
-
-  if (msg.has_value())
-  {
-    if (this->actuatorNumber > msg->normalized_size() - 1)
-    {
-      gzerr << "You tried to access index " << this->actuatorNumber
-        << " of the Actuator array which is of size "
-        << msg->normalized_size() << std::endl;
-      return;
-    }
-  }
-  else
-  {
-    return;
-  }
-
-  // METHOD:
-  //
-  // targetDutyCycle starts as a normalized value between 0 and 1, so we
-  // need to convert it to the corresponding time in the duty cycle
-  // period
-  //   |________|    |________
-  //   |    ^   |    |        |
-  // __|    |   |____|        |__
-  //   a    b    c   d
-  // a: cycle start time
-  // b: sampling time
-  // c: target duty cycle
-  // d: cycle period
-  double targetDutyCycle =
-    msg->normalized(this->actuatorNumber) * (1.0 / this->dutyCycleFrequency);
-  if (this->actuatorNumber == 0)
-    gzdbg << this->actuatorNumber
-              << ": target duty cycle: " << targetDutyCycle << std::endl;
-
-  // Calculate cycle start time
-  if (this->samplingTime >= 1.0/this->dutyCycleFrequency) {
-    if (this->actuatorNumber == 0)
-      gzdbg << this->actuatorNumber
-                << ": Cycle completed. Resetting cycle start time."
-                << std::endl;
-    this->cycleStartTime = this->simTime;
-  }
-
-  // Calculate sampling time instant within the cycle
-  this->samplingTime = this->simTime - this->cycleStartTime;
-  if (this->actuatorNumber == 0)
-    gzdbg << this->actuatorNumber
-              << ": PWM Period: " << 1.0/this->dutyCycleFrequency
-              << " Cycle Start time: " << this->cycleStartTime
-              << " Sampling time: " << this->samplingTime << std::endl;
-
-  // Apply force if the sampling time is less than the target ON duty cycle
-  double force = this->samplingTime <= targetDutyCycle ? this->maxThrust : 0.0;
-  if(targetDutyCycle < 1e-9) force = 0.0;
-
-  if (this->actuatorNumber == 0)
-    gzdbg << this->actuatorNumber
-              << ": Force: " << force
-              << "  Sampling time: " << this->samplingTime
-              << "  Tgt duty cycle: " << targetDutyCycle << std::endl;
-
+  GZ_PROFILE("ClohesseyWiltshireModelPrivate::UpdateForces");
+  
+  
   // Apply force to the link
   Link link(this->linkEntity);
   const auto worldPose = link.WorldPose(_ecm);
-  link.AddWorldForce(_ecm,
-    worldPose->Rot().RotateVector(math::Vector3d(0, 0, force)));
-  if (this->actuatorNumber == 0)
-    gzdbg << this->actuatorNumber
-              << ": Input Value: " << msg->normalized(this->actuatorNumber)
-              << "  Calc. Force: " << force << std::endl;
+  const auto linearVel = link.WorldLinearVelocity(_ecm);
+  
+  if (!worldPose)
+  {
+    gzerr << "World pose not available for link [" << this->linkName
+           << "]. Cannot apply forces." << std::endl;
+    return;
+  }
+  if (!linearVel)
+  {
+    gzerr << "Linear velocity not available for link [" << this->linkName
+           << "]. Cannot apply forces." << std::endl;
+    return;
+  }
+
+  const double mass = link.WorldInertial(_ecm)->MassMatrix().Mass();
+
+  double vx = linearVel->X();
+  double vy = linearVel->Y();
+
+  double x = worldPose->Pos().X();
+  // double y = worldPose->Pos().Y();
+  double z = worldPose->Pos().Z();
+  double n = this->meanMotion;
+
+  double ax = 3 * n * n * x + 2 * n * vy;
+  double ay = -2 * n * vx;
+  double az = -n * n * z;
+
+  double fx = mass * ax;
+  double fy = mass * ay;
+  double fz = mass * az;
+
+  link.AddWorldForce(_ecm, math::Vector3d(fx, fy, fz));
 }
 
-GZ_ADD_PLUGIN(SpacecraftThrusterModel,
+GZ_ADD_PLUGIN(ClohesseyWiltshireModel,
                     System,
-                    SpacecraftThrusterModel::ISystemConfigure,
-                    SpacecraftThrusterModel::ISystemPreUpdate)
+                    ClohesseyWiltshireModel::ISystemConfigure,
+                    ClohesseyWiltshireModel::ISystemPreUpdate)
 
-GZ_ADD_PLUGIN_ALIAS(SpacecraftThrusterModel,
-                          "gz::sim::systems::SpacecraftThrusterModel")
+GZ_ADD_PLUGIN_ALIAS(ClohesseyWiltshireModel,
+                          "gz::sim::systems::ClohesseyWiltshireModel")
 
 // TODO(CH3): Deprecated, remove on version 8
-GZ_ADD_PLUGIN_ALIAS(SpacecraftThrusterModel,
-                          "ignition::gazebo::systems::SpacecraftThrusterModel")
+GZ_ADD_PLUGIN_ALIAS(ClohesseyWiltshireModel,
+                          "ignition::gazebo::systems::ClohesseyWiltshireModel")

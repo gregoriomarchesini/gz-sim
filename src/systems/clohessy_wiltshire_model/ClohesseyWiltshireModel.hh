@@ -29,7 +29,7 @@ inline namespace GZ_SIM_VERSION_NAMESPACE {
 namespace systems
 {
   // Forward declaration
-  class ClosesseyWiltshireModelPrivate;
+  class ClohesseyWiltshireModelPrivate;
 
   /// \brief This plugin implements the Cloessey-Wiltshire Relative Dynamics
   /// acceleration model. For this model, the world frame origin (0,0,0) represents the 
@@ -66,22 +66,22 @@ namespace systems
   /// velocity vector of the target spacraft as it moves along its orbit. The z direction is the normal 
   /// to the orbital plane and the x direction is the cross product of the previous two (the vector pointing
   /// outward in the radial direction of the target spaceraft).
-  /// Below follow the minimum necessary parameters needed by the plugin:
+  /// Below follow the minimum necessary parameters needed by the <plugin> tag in the SDF file to use this model.:
 
   /// \param link_name Name of the link over which the acceleration should be applied.
-  /// \param mean_motion Mean motion of the target spacecraft.
+  /// \param mean_motion Mean motion of the target spacecraft in rad/s. For the Earth, this is approximately 0.0012 rad/s.
 
 
-  class ClosesseyWiltshireModel
+  class ClohesseyWiltshireModel
       : public System,
         public ISystemConfigure,
         public ISystemPreUpdate
   {
     /// \brief Constructor
-    public: ClosesseyWiltshireModel();
+    public: ClohesseyWiltshireModel();
 
     /// \brief Destructor
-    public: ~ClosesseyWiltshireModel() override = default;
+    public: ~ClohesseyWiltshireModel() override = default;
 
     // Documentation inherited
     public: void Configure(const Entity &_entity,
@@ -95,7 +95,7 @@ namespace systems
                 gz::sim::EntityComponentManager &_ecm) override;
 
     /// \brief Private data pointer
-    private: std::unique_ptr<ClosesseyWiltshireModelPrivate> dataPtr;
+    private: std::unique_ptr<ClohesseyWiltshireModelPrivate> dataPtr;
   };
   }
 }
